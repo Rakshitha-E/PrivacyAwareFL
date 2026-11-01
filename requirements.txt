@@ -2,4 +2,5 @@ numpy
 pandas
 scikit-learn
 matplotlib
-ucimlrepo
+streamlit>=1.50
+plotly>=5.24

@@ -1,0 +1,10 @@
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.env
+archive.zip
+cardio_train.csv
+heart+disease.zip
+results/run_*/
+results/cardio_run_*/

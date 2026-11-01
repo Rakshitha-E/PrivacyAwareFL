@@ -1,0 +1,3 @@
+scenario,dropped_client,dropped_round,accuracy,precision,recall,f1_score,change_accuracy,change_precision,change_recall,change_f1_score
+No dropout,,,0.7258365395826046,0.7561272850372377,0.6580249823238274,0.7036733665175477,0.0,0.0,0.0,0.0
+Client 3 dropout,3.0,4.0,0.7258365395826046,0.7561272850372377,0.6580249823238274,0.7036733665175477,0.0,0.0,0.0,0.0
