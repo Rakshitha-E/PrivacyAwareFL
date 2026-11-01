@@ -3,6 +3,7 @@ import unittest
 import zipfile
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 import train_cardio
@@ -33,6 +34,51 @@ class CardioArchiveTests(unittest.TestCase):
         self.assertIn("diastolic_bp", cleaned.columns)
         self.assertEqual(set(cleaned["cardio"]), {0, 1})
         self.assertAlmostEqual(cleaned.iloc[0]["age_years"], 18000 / 365.25)
+
+    def test_prepare_data_keeps_split_disjoint_and_fits_scaler_on_training_rows(self):
+        rows = []
+        for index in range(12):
+            rows.append([
+                index + 1,
+                18000 + index * 100,
+                1 + index % 2,
+                160 + index,
+                60 + index,
+                120 + index,
+                75 + index,
+                1,
+                1,
+                0,
+                0,
+                1,
+                index % 2,
+            ])
+        frame = pd.DataFrame(rows, columns=train_cardio.EXPECTED_COLUMNS)
+        with tempfile.TemporaryDirectory() as directory:
+            archive_path = Path(directory) / "cardio.zip"
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr(
+                    "cardio_train.csv",
+                    frame.to_csv(index=False, sep=";"),
+                )
+            prepared = train_cardio.prepare_cardio_data(archive_path)
+
+        train_indices = prepared["train_row_indices"]
+        test_indices = prepared["test_row_indices"]
+        self.assertEqual(len(set(train_indices) & set(test_indices)), 0)
+        self.assertEqual(len(train_indices) + len(test_indices), len(frame))
+        raw_train = prepared["frame"].iloc[train_indices].loc[
+            :, list(train_cardio.FEATURE_NAMES)
+        ].to_numpy(dtype=float)
+        np.testing.assert_allclose(
+            prepared["scaler"].mean_,
+            raw_train.mean(axis=0),
+        )
+        np.testing.assert_allclose(
+            prepared["X_train"].mean(axis=0),
+            np.zeros(len(train_cardio.FEATURE_NAMES)),
+            atol=1e-12,
+        )
 
 
 if __name__ == "__main__":

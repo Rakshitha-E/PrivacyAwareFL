@@ -92,25 +92,24 @@ def load_cardio_archive(archive_path: Path) -> tuple[pd.DataFrame, pd.Series]:
     return clean, plausible_measurements
 
 
-def create_output_directory(results_dir: Path) -> Path:
-    results_dir.mkdir(parents=True, exist_ok=True)
-    run_name = f"cardio_run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    output_dir = results_dir / run_name
-    suffix = 1
-    while output_dir.exists():
-        output_dir = results_dir / f"{run_name}_{suffix}"
-        suffix += 1
-    output_dir.mkdir()
-    return output_dir
+def prepare_cardio_data(archive_path: Path) -> dict[str, object]:
+    """Create the shared, leakage-safe cardio train/test split and features."""
 
-
-def train(archive_path: Path, results_dir: Path) -> Path:
     frame, plausible_measurements = load_cardio_archive(archive_path)
     features = frame.loc[:, list(FEATURE_NAMES)].astype(float)
     labels = frame["cardio"].to_numpy(dtype=int)
-    X_train_df, X_test_df, y_train, y_test = train_test_split(
+    row_indices = np.arange(len(frame))
+    (
+        X_train_df,
+        X_test_df,
+        y_train,
+        y_test,
+        train_row_indices,
+        test_row_indices,
+    ) = train_test_split(
         features,
         labels,
+        row_indices,
         test_size=0.25,
         random_state=project.RANDOM_SEED,
         stratify=labels,
@@ -126,6 +125,45 @@ def train(archive_path: Path, results_dir: Path) -> Path:
     scaler = StandardScaler()
     X_train = scaler.fit_transform(X_train_df)
     X_test = scaler.transform(X_test_df)
+
+    return {
+        "frame": frame,
+        "plausible_measurements": plausible_measurements,
+        "X_train": X_train,
+        "X_test": X_test,
+        "X_test_raw": X_test_df,
+        "y_train": y_train,
+        "y_test": y_test,
+        "scaler": scaler,
+        "imputation_medians": imputation_medians,
+        "train_row_indices": train_row_indices,
+        "test_row_indices": test_row_indices,
+    }
+
+
+def create_output_directory(results_dir: Path) -> Path:
+    results_dir.mkdir(parents=True, exist_ok=True)
+    run_name = f"cardio_run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    output_dir = results_dir / run_name
+    suffix = 1
+    while output_dir.exists():
+        output_dir = results_dir / f"{run_name}_{suffix}"
+        suffix += 1
+    output_dir.mkdir()
+    return output_dir
+
+
+def train(archive_path: Path, results_dir: Path) -> Path:
+    prepared = prepare_cardio_data(archive_path)
+    frame = prepared["frame"]
+    plausible_measurements = prepared["plausible_measurements"]
+    X_train = prepared["X_train"]
+    X_test = prepared["X_test"]
+    X_test_df = prepared["X_test_raw"]
+    y_train = prepared["y_train"]
+    y_test = prepared["y_test"]
+    scaler = prepared["scaler"]
+    imputation_medians = prepared["imputation_medians"]
 
     clients = project.split_clients_non_iid(
         X_train,

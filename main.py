@@ -800,6 +800,115 @@ def split_clients_non_iid(
     return clients
 
 
+def partition_indices_iid(y, num_clients, seed=RANDOM_SEED):
+    """Randomly split row indices into balanced, non-overlapping IID clients."""
+
+    y = np.asarray(y)
+    if y.ndim != 1:
+        raise ValueError("y must be a one-dimensional label array.")
+    if num_clients < 2:
+        raise ValueError("At least two clients are required.")
+    if len(y) < num_clients:
+        raise ValueError("There must be at least one sample per client.")
+
+    shuffled_indices = np.random.default_rng(seed).permutation(len(y))
+    return {
+        client_id: indices
+        for client_id, indices in enumerate(
+            np.array_split(shuffled_indices, num_clients),
+            start=1,
+        )
+    }
+
+
+def partition_indices_dirichlet(
+    y,
+    num_clients,
+    alpha,
+    seed=RANDOM_SEED,
+):
+    """Partition rows by label using Dirichlet class proportions.
+
+    Each class receives a client-proportion draw from Dirichlet(alpha). Client
+    capacities are kept as balanced as possible; excess allocation is
+    redistributed over clients with remaining capacity.
+    """
+
+    y = np.asarray(y)
+    if y.ndim != 1:
+        raise ValueError("y must be a one-dimensional label array.")
+    if num_clients < 2:
+        raise ValueError("At least two clients are required.")
+    if len(y) < num_clients:
+        raise ValueError("There must be at least one sample per client.")
+    if not np.isfinite(alpha) or alpha <= 0:
+        raise ValueError("Dirichlet alpha must be a positive finite number.")
+    labels = np.unique(y)
+    if labels.size < 2:
+        raise ValueError("Dirichlet partitioning requires at least two classes.")
+
+    rng = np.random.default_rng(seed)
+    target_sizes = np.full(num_clients, len(y) // num_clients, dtype=int)
+    target_sizes[:len(y) % num_clients] += 1
+    remaining_capacity = target_sizes.copy()
+    client_indices: list[list[np.ndarray]] = [
+        [] for _ in range(num_clients)
+    ]
+
+    for label in rng.permutation(labels):
+        label_indices = rng.permutation(np.flatnonzero(y == label))
+        proportions = rng.dirichlet(np.full(num_clients, alpha, dtype=float))
+        proposed = rng.multinomial(len(label_indices), proportions)
+        allocated = np.minimum(proposed, remaining_capacity)
+        remaining_capacity -= allocated
+        overflow = len(label_indices) - int(allocated.sum())
+
+        while overflow:
+            eligible = remaining_capacity > 0
+            available_probabilities = proportions * eligible
+            available_probabilities /= available_probabilities.sum()
+            proposed = rng.multinomial(overflow, available_probabilities)
+            accepted = np.minimum(proposed, remaining_capacity)
+            accepted_count = int(accepted.sum())
+            if accepted_count == 0:
+                raise RuntimeError(
+                    "Unable to distribute Dirichlet overflow into client capacity."
+                )
+            allocated += accepted
+            remaining_capacity -= accepted
+            overflow -= accepted_count
+
+        offset = 0
+        for client_index, count in enumerate(allocated):
+            end = offset + int(count)
+            if end > offset:
+                client_indices[client_index].append(label_indices[offset:end])
+            offset = end
+        if offset != len(label_indices):
+            raise RuntimeError("Dirichlet allocation lost class records.")
+
+    partitions = {}
+    for client_id, chunks in enumerate(client_indices, start=1):
+        indices = (
+            np.concatenate(chunks)
+            if chunks
+            else np.array([], dtype=int)
+        )
+        rng.shuffle(indices)
+        partitions[client_id] = indices
+
+    if np.any(remaining_capacity):
+        raise RuntimeError("Dirichlet allocation left client capacity unfilled.")
+    assigned = np.concatenate(list(partitions.values()))
+    if len(assigned) != len(y) or not np.array_equal(
+        np.sort(assigned), np.arange(len(y))
+    ):
+        raise RuntimeError(
+            "Dirichlet partition must assign every row exactly once."
+        )
+    return partitions
+
+
 # ============================================================
 # MODEL EVALUATION
 # ============================================================
@@ -941,7 +1050,8 @@ def train_federated_model(
     num_rounds=NUM_ROUNDS,
     dropout_round=None,
     dropout_client_id=None,
-    verbose=True
+    verbose=True,
+    seed=RANDOM_SEED,
 ):
     """Train FedAvg, optionally omitting a client at one fixed round."""
 
@@ -951,7 +1061,7 @@ def train_federated_model(
         raise ValueError("At least one client is required.")
 
     first_client = next(iter(clients.values()))
-    weights, bias = initialize_model(first_client[0].shape[1])
+    weights, bias = initialize_model(first_client[0].shape[1], seed=seed)
     history = []
 
     for round_num in range(1, num_rounds + 1):
@@ -976,7 +1086,7 @@ def train_federated_model(
                 y_client,
                 weights,
                 bias,
-                seed=RANDOM_SEED + round_num * 100 + client_id
+                seed=seed + round_num * 100 + client_id
             )
             client_updates.append((
                 local_weights,

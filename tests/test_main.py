@@ -36,6 +36,75 @@ class FederatedLearningTests(unittest.TestCase):
                 ]
                 self.assertGreater(proportions[-1], proportions[0])
 
+    def test_iid_indices_are_reproducible_balanced_and_complete(self):
+        rng = np.random.default_rng(12)
+        labels = rng.binomial(1, 0.43, size=12000)
+
+        first = main.partition_indices_iid(labels, num_clients=4, seed=19)
+        second = main.partition_indices_iid(labels, num_clients=4, seed=19)
+
+        for client_id in first:
+            np.testing.assert_array_equal(first[client_id], second[client_id])
+        sizes = [len(indices) for indices in first.values()]
+        self.assertLessEqual(max(sizes) - min(sizes), 1)
+        assigned = np.concatenate(list(first.values()))
+        np.testing.assert_array_equal(np.sort(assigned), np.arange(len(labels)))
+        client_proportions = [
+            labels[indices].mean() for indices in first.values()
+        ]
+        self.assertLess(
+            max(abs(value - labels.mean()) for value in client_proportions),
+            0.03,
+        )
+
+    def test_dirichlet_partitions_are_complete_balanced_and_alpha_sensitive(self):
+        labels = np.tile([0, 1], 5000)
+        low_alpha_std = []
+        high_alpha_std = []
+        for seed in range(5):
+            low_alpha = main.partition_indices_dirichlet(
+                labels, num_clients=4, alpha=0.05, seed=seed
+            )
+            high_alpha = main.partition_indices_dirichlet(
+                labels, num_clients=4, alpha=100.0, seed=seed
+            )
+            for partitions in (low_alpha, high_alpha):
+                assigned = np.concatenate(list(partitions.values()))
+                np.testing.assert_array_equal(
+                    np.sort(assigned), np.arange(len(labels))
+                )
+                sizes = [len(indices) for indices in partitions.values()]
+                self.assertLessEqual(max(sizes) - min(sizes), 1)
+            low_alpha_std.append(np.std([
+                labels[indices].mean() for indices in low_alpha.values()
+            ]))
+            high_alpha_std.append(np.std([
+                labels[indices].mean() for indices in high_alpha.values()
+            ]))
+        self.assertGreater(np.mean(low_alpha_std), np.mean(high_alpha_std))
+
+    def test_dirichlet_partition_handles_single_class_client_shards(self):
+        labels = np.array([0] * 10 + [1] * 2)
+        partitions = main.partition_indices_dirichlet(
+            labels, num_clients=4, alpha=0.01, seed=8
+        )
+        self.assertTrue(any(
+            np.unique(labels[indices]).size == 1
+            for indices in partitions.values()
+        ))
+        for indices in partitions.values():
+            X = np.arange(len(indices), dtype=float).reshape(-1, 1)
+            weights, bias = main.initialize_model(1, seed=3)
+            weights, bias = main.train_local_model(
+                X,
+                labels[indices],
+                weights,
+                bias,
+                seed=3,
+            )
+            self.assertTrue(np.isfinite(weights).all())
+            self.assertTrue(np.isfinite(bias))
+
     def test_fedavg_uses_sample_size_weights(self):
         weights, bias = main.fedavg([
             (np.array([2.0]), 1.0, 1),

@@ -1,0 +1,28 @@
+{
+  "dataset": "Cardiovascular disease (cardio_train.csv)",
+  "source_archive_name": "archive.zip",
+  "train_rows": 51461,
+  "test_rows": 17154,
+  "test_set_sha256": "c8668d8e84bb4b2a8b457790db714dee38f489021428c4583730e174b263990e",
+  "preprocessing": "Fixed stratified split; imputation medians and StandardScaler fit only on training data.",
+  "num_clients": 4,
+  "num_rounds": 10,
+  "seeds": [
+    42,
+    43,
+    44
+  ],
+  "alphas": [
+    0.1,
+    0.5,
+    1.0,
+    10.0
+  ],
+  "iid_method": "Random shuffle and balanced array split.",
+  "non_iid_method": "Per-class Dirichlet client proportions with capacity-aware redistribution to balanced client sample counts.",
+  "model": "Existing custom logistic regression and FedAvg implementation.",
+  "dropout": false,
+  "differential_privacy": false,
+  "meaning": "Smaller alpha generally yields more heterogeneous client label proportions; larger alpha generally yields more similar proportions.",
+  "privacy_note": "This experiment studies data heterogeneity and does not provide additional privacy protection."
+}

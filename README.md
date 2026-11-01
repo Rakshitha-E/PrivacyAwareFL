@@ -246,12 +246,17 @@ python -m pip install -r requirements.txt
 python -m streamlit run app.py
 ```
 
-The dashboard lists the available saved runs in its sidebar and defaults to
-the newest cardio run when one exists. It reads metrics and model artifacts
-from the selected run; it does not retrain models or overwrite results.
-Dataset-specific counts, feature fields, labels, and prediction inputs are
-loaded from that run's summary and model metadata. Privacy, scalability, and
-dropout results are shown only when the selected run includes those artifacts.
+The sidebar first offers exactly two dataset types: UCI Cleveland Heart Disease
+and Cardiovascular Disease (`cardio_train.csv`). It identifies compatible runs
+from the saved model's exact ordered feature schema; when multiple compatible
+runs exist, a separate training-run selector is shown. The selected dataset,
+record counts, feature count, and run name are displayed in the sidebar. A
+dataset without a compatible saved model produces an error rather than falling
+back to another dataset's model. The dashboard reads metrics and model
+artifacts from the selected run; it does not retrain models or overwrite
+results. Prediction inputs follow that run's model feature order and use its
+saved imputation and scaling parameters. Privacy, scalability, and dropout
+results are shown only when the selected run includes those artifacts.
 Predictions are for educational demonstration only, not medical diagnosis.
 
 ## Training on the cardio dataset
@@ -277,12 +282,50 @@ experiments. DP accounting is conditional on the project's documented
 assumptions; preprocessing statistics are not privatized, and these results
 are not a certified end-to-end privacy guarantee.
 
+## IID versus Non-IID FedAvg experiment
+
+Run the dedicated comparison against the same cardio dataset and the shared,
+fixed stratified train/test split:
+
+```powershell
+python run_iid_noniid.py --dataset-zip "C:\path\to\archive.zip"
+```
+
+By default, the experiment uses four simulated clients, the existing FedAvg
+model and round count, three independent training/partition seeds (`42`, `43`,
+and `44`), and Dirichlet alpha values `0.1`, `0.5`, `1.0`, and `10.0`. Configure
+the repetition, alpha, client, or round counts with `--seeds`, `--alphas`,
+`--clients`, and `--rounds`. At least two unique seeds are required. IID uses
+random shuffled, balanced splits; the Non-IID partitioner draws per-class
+client proportions from a Dirichlet distribution and redistributes overflow
+to maintain balanced sample counts. Every training row is assigned once.
+
+Smaller alpha generally yields more heterogeneous client label distributions;
+larger alpha generally yields more similar distributions. This is a statistical
+tendency, not a guarantee of monotonic measured model performance. The same
+held-out test records and training-only imputation/scaling are reused for every
+condition. The IID/Non-IID trials train independently from scratch with matching
+model settings and no dropout or differential-privacy noise. Client-local model
+scores are evaluated on that same held-out test set. The analysis studies
+heterogeneity and does not provide additional privacy protection.
+
+Each run creates a new `results/iid_noniid_run_*` directory without replacing
+previous results. It contains per-seed metrics, mean/standard-deviation
+summaries, round histories, client-wise distribution and local-model metrics,
+a partition audit with the shared test-set hash, and five plots:
+`iid_vs_noniid_performance.png`, `client_class_distribution.png`,
+`accuracy_across_rounds.png`, `f1_across_rounds.png`, and
+`performance_by_alpha.png`. The dashboard's **IID vs Non-IID Analysis** page
+reads these saved results; it does not start training.
+
 ## Limitations and future work
 
-This is a small, single-seed dataset simulation. Further work should include
-larger independent datasets, repeated data splits, confidence intervals,
-client-level validation, secure aggregation, production-grade private
-randomness, end-to-end DP treatment of preprocessing, and strict per-client
-preprocessing for the local-only baseline. Secure aggregation is a future
-direction, not an implemented feature. Do not use these results for clinical
-decision-making.
+This remains a simulation on one historical dataset. The standard baseline
+bundle uses one seed; the IID/Non-IID study repeats partitioning and training
+across three seeds but intentionally holds its split fixed for a controlled
+comparison. Further work should include larger independent datasets, repeated
+train/test splits, confidence intervals, client-level validation, secure
+aggregation, production-grade private randomness, end-to-end DP treatment of
+preprocessing, and strict per-client preprocessing for the local-only baseline.
+Secure aggregation is a future direction, not an implemented feature. Do not
+use these results for clinical decision-making.

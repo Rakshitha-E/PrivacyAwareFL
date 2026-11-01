@@ -10,22 +10,22 @@ import plotly.express as px
 import streamlit as st
 
 import main as project
+import train_cardio
 
 
 BASE_DIR = Path(__file__).resolve().parent
 RESULTS_DIR = BASE_DIR / "results"
-CARDIO_RUNS = sorted(
-    RESULTS_DIR.glob("cardio_run_*"),
-    key=lambda path: path.stat().st_mtime,
-    reverse=True,
+DATASET_TYPES = (
+    "UCI Cleveland Heart Disease",
+    "Cardiovascular Disease (cardio_train.csv)",
 )
-LEGACY_RUN_DIR = RESULTS_DIR / "run_20261101_192937"
-RUN_DIR = (
-    CARDIO_RUNS[0]
-    if CARDIO_RUNS
-    else LEGACY_RUN_DIR
-)
+DATASET_FEATURES = {
+    DATASET_TYPES[0]: tuple(project.HEART_FEATURE_NAMES),
+    DATASET_TYPES[1]: tuple(train_cardio.FEATURE_NAMES),
+}
+RUN_DIR = RESULTS_DIR
 MODEL_PATH = RUN_DIR / "global_model.npz"
+SELECTED_DATASET: str | None = None
 METRICS = ("accuracy", "precision", "recall", "f1_score")
 METRIC_LABELS = {
     "accuracy": "Accuracy",
@@ -39,6 +39,7 @@ PAGES = (
     "Model comparison",
     "Differential privacy",
     "Additional experiments",
+    "IID vs Non-IID Analysis",
     "Heart disease prediction",
     "Project information",
 )
@@ -208,6 +209,36 @@ def load_run_summary(run_dir: str) -> dict[str, Any]:
     }
 
 
+@st.cache_data(show_spinner=False)
+def load_iid_configuration(run_dir: str) -> dict[str, Any]:
+    path = Path(run_dir) / "configuration.json"
+    if not path.is_file():
+        raise DashboardDataError(f"Experiment configuration was not found: {path}")
+    try:
+        configuration = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise DashboardDataError(
+            f"Could not read experiment configuration: {error}"
+        ) from error
+    if not isinstance(configuration, dict):
+        raise DashboardDataError("Experiment configuration must be a JSON object.")
+    return configuration
+
+
+def available_iid_experiment_dirs() -> list[Path]:
+    return sorted(
+        (
+            path
+            for path in RESULTS_DIR.glob("iid_noniid_run_*")
+            if path.is_dir()
+            and (path / "summary_metrics.csv").is_file()
+            and (path / "client_metrics_and_distribution.csv").is_file()
+        ),
+        key=lambda path: path.name,
+        reverse=True,
+    )
+
+
 def available_run_dirs() -> list[Path]:
     return sorted(
         (
@@ -222,18 +253,64 @@ def available_run_dirs() -> list[Path]:
     )
 
 
+def dataset_type_for_features(feature_names: tuple[str, ...]) -> str | None:
+    normalized_names = tuple(str(name) for name in feature_names)
+    return next(
+        (
+            dataset_name
+            for dataset_name, expected_names in DATASET_FEATURES.items()
+            if normalized_names == expected_names
+        ),
+        None,
+    )
+
+
+def compatible_run_dirs(dataset_name: str) -> list[Path]:
+    if dataset_name not in DATASET_FEATURES:
+        raise ValueError(f"Unknown dataset type: {dataset_name}")
+
+    compatible = []
+    expected_features = DATASET_FEATURES[dataset_name]
+    for path in available_run_dirs():
+        try:
+            metadata = load_model_metadata(str(path / "global_model.npz"))
+            summary = load_run_summary(str(path))
+        except DashboardDataError:
+            continue
+        summary_features = tuple(summary.get("features", ()))
+        if (
+            metadata["feature_names"] == expected_features
+            and (not summary_features or summary_features == expected_features)
+        ):
+            compatible.append(path)
+    return compatible
+
+
 def run_label(path: Path) -> str:
-    try:
-        summary = load_run_summary(str(path))
-    except DashboardDataError:
-        return path.name
-    return f"{summary.get('dataset', path.name)} · {path.name}"
+    return path.name
 
 
 def load_active_run_context() -> dict[str, Any]:
-    summary = load_run_summary(str(RUN_DIR))
+    if SELECTED_DATASET is None:
+        raise DashboardDataError("Select a dataset before loading its training run.")
     metadata = load_model_metadata(str(MODEL_PATH))
-    return {**summary, **metadata}
+    model_dataset = dataset_type_for_features(metadata["feature_names"])
+    if model_dataset != SELECTED_DATASET:
+        raise DashboardDataError(
+            f"The selected run's model is not compatible with {SELECTED_DATASET}."
+        )
+    summary = load_run_summary(str(RUN_DIR))
+    summary_features = tuple(summary.get("features", ()))
+    if summary_features and summary_features != metadata["feature_names"]:
+        raise DashboardDataError(
+            "The selected run summary and saved model use different feature schemas."
+        )
+    return {
+        **summary,
+        **metadata,
+        "dataset": SELECTED_DATASET,
+        "selected_run": RUN_DIR.name,
+    }
 
 
 def show_data_error(error: Exception) -> None:
@@ -701,6 +778,294 @@ def render_additional_experiments() -> None:
             show_data_error(error)
 
 
+def render_iid_noniid_analysis() -> None:
+    section_heading(
+        "IID vs Non-IID Analysis",
+        "FedAvg comparison using repeated, reproducible partitions of the cardio training data.",
+    )
+    st.markdown(
+        """
+        **IID** means each simulated hospital receives a random, balanced share of
+        training records, so its disease mix is close to the overall mix.
+        **Non-IID** means each hospital can have a different disease/no-disease
+        mix. The Dirichlet alpha parameter controls the sampled heterogeneity:
+        smaller values generally produce more uneven class proportions, while
+        larger values generally make them more alike.
+
+        These are simulated hospitals, not real institutions. The same fixed
+        held-out test set and training-only preprocessing are used in each trial.
+        This experiment studies data heterogeneity; it does **not** add privacy
+        protection.
+        """
+    )
+    experiment_dirs = available_iid_experiment_dirs()
+    if not experiment_dirs:
+        st.info(
+            "No IID versus Non-IID results are saved yet. Run "
+            "`python run_iid_noniid.py --dataset-zip \"C:\\path\\to\\archive.zip\"` "
+            "from the project directory to create them."
+        )
+        return
+
+    selected_dir = st.selectbox(
+        "Saved IID/Non-IID experiment",
+        experiment_dirs,
+        format_func=lambda path: path.name,
+        key="iid_noniid_experiment",
+    )
+    try:
+        configuration = load_iid_configuration(str(selected_dir))
+        summary = load_csv("summary_metrics.csv", str(selected_dir))
+        client_data = load_csv(
+            "client_metrics_and_distribution.csv",
+            str(selected_dir),
+        )
+        required_summary = {
+            "method",
+            "alpha",
+            "accuracy_mean",
+            "accuracy_std",
+            "f1_score_mean",
+            "f1_score_std",
+            "precision_mean",
+            "precision_std",
+            "recall_mean",
+            "recall_std",
+            "roc_auc_mean",
+            "roc_auc_std",
+        }
+        required_clients = {
+            "method",
+            "alpha",
+            "client_id",
+            "sample_count",
+            "class_0_count",
+            "class_1_count",
+            "local_accuracy",
+            "local_f1_score",
+        }
+        if not required_summary.issubset(summary.columns):
+            raise DashboardDataError("summary_metrics.csv is missing expected metrics.")
+        if not required_clients.issubset(client_data.columns):
+            raise DashboardDataError(
+                "Client distribution results are missing expected columns."
+            )
+    except DashboardDataError as error:
+        show_data_error(error)
+        return
+
+    alpha_values = sorted(
+        float(alpha)
+        for alpha in summary.loc[
+            summary["method"] == "Non-IID", "alpha"
+        ].dropna().unique()
+    )
+    if not alpha_values:
+        st.error("This experiment has no Non-IID alpha settings.")
+        return
+    details = st.columns(4)
+    for column, value, label in (
+        (details[0], configuration.get("num_clients", "—"), "Simulated clients"),
+        (details[1], configuration.get("num_rounds", "—"), "FedAvg rounds"),
+        (details[2], len(configuration.get("seeds", [])), "Random seeds"),
+        (details[3], ", ".join(f"{alpha:g}" for alpha in alpha_values), "Dirichlet alpha"),
+    ):
+        column.metric(label, value)
+    st.caption(
+        f"Training/test rows: {configuration.get('train_rows', '—')}/"
+        f"{configuration.get('test_rows', '—')} · "
+        f"shared test-set SHA-256: {configuration.get('test_set_sha256', 'not recorded')}"
+    )
+    st.markdown(
+        "**Partitioning:** "
+        + str(configuration.get("iid_method", "IID details unavailable"))
+        + " **Non-IID:** "
+        + str(configuration.get("non_iid_method", "Dirichlet details unavailable"))
+    )
+    st.markdown(
+        "**Alpha interpretation:** "
+        + str(configuration.get("meaning", "Not recorded."))
+    )
+
+    st.subheader("Held-out FedAvg performance")
+    metric_names = (
+        ("accuracy", "Accuracy"),
+        ("precision", "Precision"),
+        ("recall", "Recall"),
+        ("f1_score", "F1 score"),
+        ("roc_auc", "ROC-AUC"),
+    )
+    comparison_rows = []
+    for row in summary.to_dict(orient="records"):
+        label = "IID" if row["method"] == "IID" else f"Non-IID (alpha={row['alpha']:g})"
+        for metric, display_name in metric_names:
+            comparison_rows.append({
+                "Condition": label,
+                "Metric": display_name,
+                "Mean": row[f"{metric}_mean"],
+                "Standard deviation": row[f"{metric}_std"],
+            })
+    comparison = pd.DataFrame(comparison_rows)
+    chart = px.bar(
+        comparison,
+        x="Condition",
+        y="Mean",
+        color="Metric",
+        barmode="group",
+        error_y="Standard deviation",
+        title="Mean held-out scores across independent seeds",
+        color_discrete_sequence=[
+            "#1976a5", "#45a4c8", "#65b891", "#e5a84b", "#8764a8"
+        ],
+    )
+    chart.update_layout(
+        yaxis={"range": [0, 1.05]},
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+        margin={"t": 55, "b": 30},
+    )
+    st.plotly_chart(chart, width="stretch")
+    display_summary = summary.copy()
+    display_summary["condition"] = [
+        "IID" if row.method == "IID" else f"Non-IID, alpha={row.alpha:g}"
+        for row in summary.itertuples()
+    ]
+    display_columns = ["condition"]
+    for metric, label in metric_names:
+        display_summary[label] = display_summary.apply(
+            lambda row: (
+                f"{row[f'{metric}_mean']:.4f} ± "
+                f"{row[f'{metric}_std']:.4f}"
+            ),
+            axis=1,
+        )
+        display_columns.append(label)
+    st.dataframe(
+        display_summary[display_columns],
+        width="stretch",
+        hide_index=True,
+    )
+    performance_plot = selected_dir / "iid_vs_noniid_performance.png"
+    if performance_plot.is_file():
+        st.image(
+            str(performance_plot),
+            caption="Saved mean performance with standard deviations.",
+        )
+
+    st.subheader("Client-wise training distribution and local performance")
+    chosen_alpha = st.selectbox(
+        "Non-IID distribution alpha",
+        alpha_values,
+        format_func=lambda alpha: f"{alpha:g}",
+        key="iid_noniid_distribution_alpha",
+    )
+    chosen = client_data[
+        (client_data["method"] == "IID")
+        | (
+            (client_data["method"] == "Non-IID")
+            & np.isclose(client_data["alpha"], chosen_alpha)
+        )
+    ]
+    client_means = chosen.groupby(
+        ["method", "client_id"],
+        as_index=False,
+    )[[
+        "sample_count",
+        "class_0_count",
+        "class_1_count",
+        "local_accuracy",
+        "local_f1_score",
+    ]].mean()
+    client_means["condition"] = np.where(
+        client_means["method"] == "IID",
+        "IID",
+        f"Non-IID (alpha={chosen_alpha:g})",
+    )
+    distribution_long = client_means.melt(
+        id_vars=["client_id", "condition"],
+        value_vars=["class_0_count", "class_1_count"],
+        var_name="Class",
+        value_name="Mean training records",
+    )
+    distribution_long["Class"] = distribution_long["Class"].map({
+        "class_0_count": "No cardiovascular disease",
+        "class_1_count": "Cardiovascular disease",
+    })
+    distribution_chart = px.bar(
+        distribution_long,
+        x="client_id",
+        y="Mean training records",
+        color="Class",
+        facet_col="condition",
+        barmode="stack",
+        title="Mean training-label distribution across seeds",
+        color_discrete_map={
+            "No cardiovascular disease": "#6baed6",
+            "Cardiovascular disease": "#f28e2b",
+        },
+    )
+    distribution_chart.update_layout(
+        xaxis_title="Simulated hospital client",
+        legend_title=None,
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+    )
+    st.plotly_chart(distribution_chart, width="stretch")
+    st.caption(
+        "Client-wise local-model scores below are each client’s independently trained "
+        "model evaluated on the same global held-out test set; they are not scores on "
+        "the client’s training records."
+    )
+    display_clients = client_means.rename(columns={
+        "client_id": "Client",
+        "sample_count": "Mean training samples",
+        "class_0_count": "Mean no-disease samples",
+        "class_1_count": "Mean disease samples",
+        "local_accuracy": "Local model accuracy",
+        "local_f1_score": "Local model F1",
+        "condition": "Condition",
+    })
+    st.dataframe(
+        display_clients[[
+            "Condition",
+            "Client",
+            "Mean training samples",
+            "Mean no-disease samples",
+            "Mean disease samples",
+            "Local model accuracy",
+            "Local model F1",
+        ]],
+        width="stretch",
+        hide_index=True,
+    )
+
+    st.subheader("Performance across communication rounds")
+    round_columns = st.columns(2)
+    for column, filename, caption in (
+        (round_columns[0], "accuracy_across_rounds.png", "Accuracy"),
+        (round_columns[1], "f1_across_rounds.png", "F1 score"),
+    ):
+        image_path = selected_dir / filename
+        if image_path.is_file():
+            column.image(
+                str(image_path),
+                caption=f"{caption} by round; error bars show seed SD.",
+            )
+        else:
+            column.error(f"Saved graph not found: {image_path}")
+    alpha_plot = selected_dir / "performance_by_alpha.png"
+    if alpha_plot.is_file():
+        st.subheader("Performance variation across alpha values")
+        st.image(
+            str(alpha_plot),
+            caption="Measured mean accuracy and F1 score across seeds; error bars show seed SD.",
+        )
+    st.caption(
+        "Metrics are empirical results from the selected saved CSV bundle. "
+        "Non-IID is not assumed to be worse; compare the measured values."
+    )
+
+
 CARDIO_INPUT_SPECS: dict[str, tuple[str, str, Any]] = {
     "age_years": ("Age", "years", (18, 100, 55)),
     "gender": ("Gender", "1 = female, 2 = male", (1, 2)),
@@ -938,33 +1303,70 @@ def render_project_information() -> None:
 
 
 def main() -> None:
-    global RUN_DIR, MODEL_PATH
+    global RUN_DIR, MODEL_PATH, SELECTED_DATASET
 
     apply_styles()
-    run_dirs = available_run_dirs()
-    if not run_dirs:
-        st.error(f"No complete model result bundles were found under {RESULTS_DIR}.")
-        st.stop()
-    preferred_run = next(
-        (path for path in run_dirs if path.name.startswith("cardio_run_")),
-        run_dirs[0],
-    )
-    run_options = [preferred_run, *[path for path in run_dirs if path != preferred_run]]
     with st.sidebar:
         st.markdown("## 🫀 FL Heart Lab")
         st.caption("Academic project demonstration")
-        selected_run = st.selectbox(
-            "Dataset / trained run",
-            run_options,
-            index=0,
-            format_func=run_label,
+        selected_dataset = st.selectbox(
+            "Dataset",
+            DATASET_TYPES,
+            index=1,
+            key="active_dataset_type",
         )
+        compatible_runs = compatible_run_dirs(selected_dataset)
+        if not compatible_runs:
+            expected_features = DATASET_FEATURES[selected_dataset]
+            st.error(
+                f"No compatible trained model was found for {selected_dataset}. "
+                f"Expected a saved model with {len(expected_features)} features "
+                f"in the required schema. Check the result bundles under {RESULTS_DIR}."
+            )
+            st.stop()
+
+        if len(compatible_runs) > 1:
+            selected_run = st.selectbox(
+                "Training run",
+                compatible_runs,
+                index=0,
+                format_func=run_label,
+                key=(
+                    "training_run_cleveland"
+                    if selected_dataset == DATASET_TYPES[0]
+                    else "training_run_cardio"
+                ),
+            )
+        else:
+            selected_run = compatible_runs[0]
+            st.caption(f"Training run: {selected_run.name}")
+
+        SELECTED_DATASET = selected_dataset
         RUN_DIR = selected_run
         MODEL_PATH = RUN_DIR / "global_model.npz"
+        try:
+            context = load_active_run_context()
+        except DashboardDataError as error:
+            st.error(f"Cannot load the selected dataset's training run: {error}")
+            st.stop()
+
+        original_rows = int(
+            context.get("original_rows", context.get("rows_used", 0))
+        )
+        rows_used = int(context.get("rows_used", original_rows))
+        st.markdown("**Selected dataset**")
+        st.write(selected_dataset)
+        if rows_used != original_rows:
+            st.caption(
+                f"Records: {original_rows:,} original · "
+                f"{rows_used:,} used after filtering"
+            )
+        else:
+            st.caption(f"Records: {rows_used:,}")
+        st.caption(f"Features: {context['feature_count']}")
+        st.caption(f"Selected run: {RUN_DIR.name}")
         page = st.radio("Navigate", PAGES, label_visibility="collapsed")
         st.divider()
-        st.caption("Results source")
-        st.code(RUN_DIR.name, language="text")
         st.caption("Educational simulation · not a clinical tool")
 
     renderers = {
@@ -973,6 +1375,7 @@ def main() -> None:
         "Model comparison": render_model_comparison,
         "Differential privacy": render_differential_privacy,
         "Additional experiments": render_additional_experiments,
+        "IID vs Non-IID Analysis": render_iid_noniid_analysis,
         "Heart disease prediction": render_prediction,
         "Project information": render_project_information,
     }
