@@ -233,32 +233,69 @@ def fedavg(client_updates):
 # DATASET GENERATION
 # ============================================================
 
+# ============================================================
+# REAL DATASET: UCI HEART DISEASE
+# ============================================================
+
 def create_dataset():
 
-    print("\nGenerating synthetic dataset...")
+    print("\nLoading UCI Heart Disease dataset...")
 
-    X, y = make_classification(
-        n_samples=2000,
-        n_features=10,
-        n_informative=6,
-        n_redundant=2,
-        n_clusters_per_class=2,
-        weights=[0.58, 0.42],
-        class_sep=1.0,
-        random_state=RANDOM_SEED
-    )
+    from ucimlrepo import fetch_ucirepo
 
-    X_train, X_test, y_train, y_test = (
-        train_test_split(
-            X,
-            y,
-            test_size=0.25,
-            random_state=RANDOM_SEED,
-            stratify=y
+    # Fetch the real dataset from the UCI repository.
+    heart_disease = fetch_ucirepo(id=45)
+
+    X = heart_disease.data.features.copy()
+    y = heart_disease.data.targets.iloc[:, 0].copy()
+
+    # Convert feature columns to numeric values.
+    # Invalid entries, including '?' if present, become NaN.
+    X = X.apply(
+        lambda column: pd.to_numeric(
+            column,
+            errors="coerce"
         )
     )
 
-    # Fit the scaler only on training data.
+    # Convert target to numeric.
+    y = pd.to_numeric(
+        y,
+        errors="coerce"
+    )
+
+    # Remove rows with missing target values.
+    valid_rows = y.notna()
+
+    X = X.loc[valid_rows].copy()
+    y = y.loc[valid_rows].copy()
+
+    # Binary classification:
+    # 0 = absence of heart disease
+    # 1 = presence of heart disease
+    y = (y > 0).astype(int)
+
+    # Replace missing feature values using column medians.
+    # This is a simple preprocessing choice for the MVP.
+    X = X.fillna(
+        X.median()
+    )
+
+    # Handle any column that remains entirely missing.
+    X = X.fillna(0)
+
+    # Split before fitting the scaler to avoid test-data leakage.
+    X_train, X_test, y_train, y_test = (
+        train_test_split(
+            X.to_numpy(dtype=float),
+            y.to_numpy(dtype=int),
+            test_size=0.25,
+            random_state=RANDOM_SEED,
+            stratify=y.to_numpy(dtype=int)
+        )
+    )
+
+    # Fit scaling parameters using training data only.
     scaler = StandardScaler()
 
     X_train = scaler.fit_transform(
@@ -269,12 +306,34 @@ def create_dataset():
         X_test
     )
 
+    print("\nReal dataset loaded successfully.")
+
+    print(
+        f"Total usable records: {len(X)}"
+    )
+
+    print(
+        f"Number of features: {X.shape[1]}"
+    )
+
+    print(
+        f"Training records: {len(X_train)}"
+    )
+
+    print(
+        f"Testing records: {len(X_test)}"
+    )
+
+    print(
+        "Target: 0 = absence, 1 = presence of heart disease"
+    )
+
     return (
         X_train.astype(float),
         X_test.astype(float),
         y_train.astype(int),
         y_test.astype(int)
-    )
+    )   
 
 
 # ============================================================
